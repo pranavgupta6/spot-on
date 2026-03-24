@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { ModelCategory, VideoCapture } from '@runanywhere/web';
 import { VLMWorkerBridge } from '@runanywhere/web-llamacpp';
-import { useModelLoader } from '../hooks/useModelLoader';
+import useModelLoader from '../hooks/useModelLoader';
 import { ModelBanner } from './ModelBanner';
 
 const LIVE_INTERVAL_MS = 2500;
@@ -95,9 +95,9 @@ export function VisionTab() {
     if (!cam?.isCapturing) return;
 
     // Ensure model loaded
-    if (loader.state !== 'ready') {
-      const ok = await loader.ensure();
-      if (!ok) return;
+    if (loader.state.status !== 'ready') {
+      await loader.downloadAndLoad();
+      if (loader.state.status === 'error') return;
     }
 
     const frame = cam.captureFrame(CAPTURE_DIM);
@@ -197,11 +197,10 @@ export function VisionTab() {
   return (
     <div className="tab-panel vision-panel">
       <ModelBanner
-        state={loader.state}
-        progress={loader.progress}
-        error={loader.error}
-        onLoad={loader.ensure}
-        label="VLM"
+        modelId="lfm2-vl-450m-q4_0"
+        modelName="LFM2-VL 450M (Vision)"
+        description="Required for skin scanning"
+        onReady={() => {}}
       />
 
       <div className="vision-camera">

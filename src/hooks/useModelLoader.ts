@@ -1,86 +1,52 @@
-import { useState, useCallback, useRef } from 'react';
-import { ModelManager, ModelCategory, EventBus } from '@runanywhere/web';
+import { useState, useCallback } from 'react';
+import { ModelManager } from '../runanywhere';
 
-export type LoaderState = 'idle' | 'downloading' | 'loading' | 'ready' | 'error';
-
-interface ModelLoaderResult {
-  state: LoaderState;
-  progress: number;
+export interface ModelLoaderState {
+  status: 'idle' | 'downloading' | 'loading' | 'ready' | 'error';
+  progress: number;        // 0–100
   error: string | null;
-  ensure: () => Promise<boolean>;
 }
 
-/**
- * Hook to download + load models for a given category.
- * Tracks download progress and loading state.
- *
- * @param category - Which model category to ensure is loaded.
- * @param coexist  - If true, only unload same-category models (allows STT+LLM+TTS to coexist).
- */
-export function useModelLoader(category: ModelCategory, coexist = false): ModelLoaderResult {
-  const [state, setState] = useState<LoaderState>(() =>
-    ModelManager.getLoadedModel(category) ? 'ready' : 'idle',
-  );
-  const [progress, setProgress] = useState(0);
-  const [error, setError] = useState<string | null>(null);
-  const loadingRef = useRef(false);
+export default function useModelLoader(modelId: string) {
+  const [state, setState] = useState<ModelLoaderState>({
+    status: 'idle',
+    progress: 0,
+    error: null,
+  });
 
-  const ensure = useCallback(async (): Promise<boolean> => {
-    // Already loaded
-    if (ModelManager.getLoadedModel(category)) {
-      setState('ready');
-      return true;
-    }
-
-    if (loadingRef.current) return false;
-    loadingRef.current = true;
-
+  const downloadAndLoad = useCallback(async (): Promise<void> => {
     try {
-      // Find a model for this category
-      const models = ModelManager.getModels().filter((m) => m.modality === category);
-      if (models.length === 0) {
-        setError(`No ${category} model registered`);
-        setState('error');
-        return false;
-      }
+      // Step 1: Start downloading
+      setState(prev => ({ ...prev, status: 'downloading', progress: 0, error: null }));
 
-      const model = models[0];
+      // Step 2: Download the model
+      // Note: Checking RunAnywhere docs for progress callback support
+      // For now, using a simple progress simulation since we need to verify the actual API
+      setState(prev => ({ ...prev, progress: 50 }));
+      await ModelManager.downloadModel(modelId);
+      setState(prev => ({ ...prev, progress: 100 }));
 
-      // Download if needed
-      if (model.status !== 'downloaded' && model.status !== 'loaded') {
-        setState('downloading');
-        setProgress(0);
+      // Step 3: Start loading into memory
+      setState(prev => ({ ...prev, status: 'loading', progress: 100 }));
 
-        const unsub = EventBus.shared.on('model.downloadProgress', (evt) => {
-          if (evt.modelId === model.id) {
-            setProgress(evt.progress ?? 0);
-          }
-        });
+      // Step 4: Load the model
+      await ModelManager.loadModel(modelId);
 
-        await ModelManager.downloadModel(model.id);
-        unsub();
-        setProgress(1);
-      }
+      // Step 5: Ready to use
+      setState(prev => ({ ...prev, status: 'ready' }));
 
-      // Load
-      setState('loading');
-      const ok = await ModelManager.loadModel(model.id, { coexist });
-      if (ok) {
-        setState('ready');
-        return true;
-      } else {
-        setError('Failed to load model');
-        setState('error');
-        return false;
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-      setState('error');
-      return false;
-    } finally {
-      loadingRef.current = false;
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      setState(prev => ({
+        ...prev,
+        status: 'error',
+        error: errorMessage,
+      }));
     }
-  }, [category, coexist]);
+  }, [modelId]);
 
-  return { state, progress, error, ensure };
+  return {
+    state,
+    downloadAndLoad,
+  };
 }

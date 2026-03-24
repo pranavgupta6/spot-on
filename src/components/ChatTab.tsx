@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { ModelCategory } from '@runanywhere/web';
 import { TextGeneration } from '@runanywhere/web-llamacpp';
-import { useModelLoader } from '../hooks/useModelLoader';
+import useModelLoader from '../hooks/useModelLoader';
 import { ModelBanner } from './ModelBanner';
 
 interface Message {
@@ -28,9 +28,9 @@ export function ChatTab() {
     if (!text || generating) return;
 
     // Ensure model is loaded
-    if (loader.state !== 'ready') {
-      const ok = await loader.ensure();
-      if (!ok) return;
+    if (loader.state.status !== 'ready') {
+      await loader.downloadAndLoad();
+      if (loader.state.status === 'error') return;
     }
 
     setInput('');
@@ -92,11 +92,10 @@ export function ChatTab() {
   return (
     <div className="tab-panel chat-panel">
       <ModelBanner
-        state={loader.state}
-        progress={loader.progress}
-        error={loader.error}
-        onLoad={loader.ensure}
-        label="LLM"
+        modelId="lfm2-350m"
+        modelName="LFM2 350M (Chat)"
+        description="Required for AI dermatology chat"
+        onReady={() => {}}
       />
 
       <div className="message-list" ref={listRef}>

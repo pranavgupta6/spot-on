@@ -13,7 +13,7 @@ import {
 } from '@runanywhere/web-llamacpp';
 import { useState, useRef, useEffect, useCallback } from 'react';
 
-import { useModelLoader } from '../hooks/useModelLoader';
+import useModelLoader from '../hooks/useModelLoader';
 import { ModelBanner } from './ModelBanner';
 
 // ---------------------------------------------------------------------------
@@ -172,9 +172,9 @@ export function ToolsTab() {
     const text = input.trim();
     if (!text || generating) return;
 
-    if (loader.state !== 'ready') {
-      const ok = await loader.ensure();
-      if (!ok) return;
+    if (loader.state.status !== 'ready') {
+      await loader.downloadAndLoad();
+      if (loader.state.status === 'error') return;
     }
 
     setInput('');
@@ -292,11 +292,10 @@ export function ToolsTab() {
   return (
     <div className="tab-panel tools-panel">
       <ModelBanner
-        state={loader.state}
-        progress={loader.progress}
-        error={loader.error}
-        onLoad={loader.ensure}
-        label="LLM"
+        modelId="lfm2-350m"
+        modelName="LFM2 350M (Tools)"
+        description="Required for tool calling features"
+        onReady={() => {}}
       />
 
       {/* Toolbar */}

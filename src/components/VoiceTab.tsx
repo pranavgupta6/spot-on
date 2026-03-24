@@ -1,16 +1,16 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { VoicePipeline, ModelCategory, ModelManager, AudioCapture, AudioPlayback, SpeechActivity } from '@runanywhere/web';
 import { VAD } from '@runanywhere/web-onnx';
-import { useModelLoader } from '../hooks/useModelLoader';
+import useModelLoader from '../hooks/useModelLoader';
 import { ModelBanner } from './ModelBanner';
 
 type VoiceState = 'idle' | 'loading-models' | 'listening' | 'processing' | 'speaking';
 
 export function VoiceTab() {
-  const llmLoader = useModelLoader(ModelCategory.Language, true);
-  const sttLoader = useModelLoader(ModelCategory.SpeechRecognition, true);
-  const ttsLoader = useModelLoader(ModelCategory.SpeechSynthesis, true);
-  const vadLoader = useModelLoader(ModelCategory.Audio, true);
+  const llmLoader = useModelLoader('lfm2-350m');
+  const sttLoader = useModelLoader('whisper-tiny-en');
+  const ttsLoader = useModelLoader('piper-en-us-amy');
+  const vadLoader = useModelLoader('whisper-tiny-en'); // VAD uses same model as STT
 
   const [voiceState, setVoiceState] = useState<VoiceState>('idle');
   const [transcript, setTranscript] = useState('');
@@ -36,10 +36,10 @@ export function VoiceTab() {
     setError(null);
 
     const results = await Promise.all([
-      vadLoader.ensure(),
-      sttLoader.ensure(),
-      llmLoader.ensure(),
-      ttsLoader.ensure(),
+      vadLoader.downloadAndLoad(),
+      sttLoader.downloadAndLoad(),
+      llmLoader.downloadAndLoad(),
+      ttsLoader.downloadAndLoad(),
     ]);
 
     if (results.every(Boolean)) {
@@ -159,17 +159,16 @@ export function VoiceTab() {
     { label: 'STT', loader: sttLoader },
     { label: 'LLM', loader: llmLoader },
     { label: 'TTS', loader: ttsLoader },
-  ].filter((l) => l.loader.state !== 'ready');
+  ].filter((l) => l.loader.state.status !== 'ready');
 
   return (
     <div className="tab-panel voice-panel">
       {pendingLoaders.length > 0 && voiceState === 'idle' && (
         <ModelBanner
-          state={pendingLoaders[0].loader.state}
-          progress={pendingLoaders[0].loader.progress}
-          error={pendingLoaders[0].loader.error}
-          onLoad={ensureModels}
-          label={`Voice (${pendingLoaders.map((l) => l.label).join(', ')})`}
+          modelId="lfm2-350m"
+          modelName="Voice Models"
+          description="Required for voice symptom checker"
+          onReady={() => {}}
         />
       )}
 

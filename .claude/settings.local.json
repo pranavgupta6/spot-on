@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx tsc:*)",
+      "Bash(npm run:*)",
+      "Bash(npm install:*)",
+      "WebFetch(domain:docs.runanywhere.ai)",
+      "Bash(npm list:*)"
+    ]
+  }
+}
