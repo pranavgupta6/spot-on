@@ -2,6 +2,9 @@ import { useState, useEffect } from 'react';
 import { initializeSDK } from './runanywhere';
 import { PrivacyBadge } from './components/PrivacyBadge';
 import ScanTab from './components/ScanTab';
+import ChatTab from './components/ChatTab';
+import VoiceTab from './components/VoiceTab';
+import HistoryTab from './components/HistoryTab';
 
 type Tab = 'scan' | 'chat' | 'voice' | 'history';
 
@@ -34,26 +37,11 @@ export function App() {
       case 'scan':
         return <ScanTab />;
       case 'chat':
-        return (
-          <div className="card animate-fadeIn placeholder-tab">
-            <h2>Chat Tab</h2>
-            <p className="placeholder-text">Coming soon</p>
-          </div>
-        );
+        return <ChatTab />;
       case 'voice':
-        return (
-          <div className="card animate-fadeIn placeholder-tab">
-            <h2>Voice Tab</h2>
-            <p className="placeholder-text">Coming soon</p>
-          </div>
-        );
+        return <VoiceTab />;
       case 'history':
-        return (
-          <div className="card animate-fadeIn placeholder-tab">
-            <h2>History Tab</h2>
-            <p className="placeholder-text">Coming soon</p>
-          </div>
-        );
+        return <HistoryTab />;
       default:
         return null;
     }

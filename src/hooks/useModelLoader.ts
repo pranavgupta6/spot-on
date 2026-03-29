@@ -1,10 +1,11 @@
-import { useState, useCallback } from 'react';
-import { ModelManager } from '../runanywhere';
+import { useState, useCallback, useEffect } from 'react'
+import { ModelManager, EventBus } from '@runanywhere/web'
 
 export interface ModelLoaderState {
-  status: 'idle' | 'downloading' | 'loading' | 'ready' | 'error';
-  progress: number;        // 0–100
-  error: string | null;
+  status: 'idle' | 'checking' | 'downloading' | 'loading' | 'ready' | 'error'
+  progress: number
+  error: string | null
+  isCached: boolean
 }
 
 export default function useModelLoader(modelId: string) {
@@ -12,41 +13,84 @@ export default function useModelLoader(modelId: string) {
     status: 'idle',
     progress: 0,
     error: null,
-  });
+    isCached: false,
+  })
 
-  const downloadAndLoad = useCallback(async (): Promise<void> => {
-    try {
-      // Step 1: Start downloading
-      setState(prev => ({ ...prev, status: 'downloading', progress: 0, error: null }));
-
-      // Step 2: Download the model
-      // Note: Checking RunAnywhere docs for progress callback support
-      // For now, using a simple progress simulation since we need to verify the actual API
-      setState(prev => ({ ...prev, progress: 50 }));
-      await ModelManager.downloadModel(modelId);
-      setState(prev => ({ ...prev, progress: 100 }));
-
-      // Step 3: Start loading into memory
-      setState(prev => ({ ...prev, status: 'loading', progress: 100 }));
-
-      // Step 4: Load the model
-      await ModelManager.loadModel(modelId);
-
-      // Step 5: Ready to use
-      setState(prev => ({ ...prev, status: 'ready' }));
-
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      setState(prev => ({
-        ...prev,
-        status: 'error',
-        error: errorMessage,
-      }));
+  // Check if model is already cached on mount
+  useEffect(() => {
+    const checkCache = async () => {
+      try {
+        console.log(`[useModelLoader] 🔍 Checking if model "${modelId}" is cached...`)
+        setState(prev => ({ ...prev, status: 'checking' }))
+        
+        // Check if model is already downloaded
+        const isCached = await ModelManager.isModelDownloaded(modelId)
+        
+        console.log(`[useModelLoader] Cache status for "${modelId}":`, isCached ? '✅ CACHED' : '❌ NOT CACHED')
+        
+        if (isCached) {
+          // Model is cached, skip download and just load it
+          console.log(`[useModelLoader] 🚀 Loading "${modelId}" from cache (no download needed)`)
+          setState({ status: 'loading', progress: 100, error: null, isCached: true })
+          
+          await ModelManager.loadModel(modelId, { coexist: true } as any)
+          
+          console.log(`[useModelLoader] ✅ Model "${modelId}" loaded successfully from cache`)
+          setState({ status: 'ready', progress: 100, error: null, isCached: true })
+        } else {
+          // Model not cached, need to download
+          console.log(`[useModelLoader] ⬇️ Model "${modelId}" needs to be downloaded (first time use)`)
+          setState({ status: 'idle', progress: 0, error: null, isCached: false })
+        }
+      } catch (err) {
+        // If check fails, assume not cached and allow manual download
+        console.warn('[useModelLoader] ⚠️ Cache check failed:', err)
+        setState({ status: 'idle', progress: 0, error: null, isCached: false })
+      }
     }
-  }, [modelId]);
 
-  return {
-    state,
-    downloadAndLoad,
-  };
+    checkCache()
+  }, [modelId])
+
+  const downloadAndLoad = useCallback(async () => {
+    try {
+      console.log(`[useModelLoader] ⬇️ Starting download for "${modelId}"`)
+      setState({ status: 'downloading', progress: 0, error: null, isCached: false })
+
+      let lastProgress = -1 // Track last logged progress to avoid duplicates
+
+      // Listen to download progress via EventBus
+      const unsub = EventBus.shared.on('model.downloadProgress', (evt: any) => {
+        if (evt.modelId === modelId) {
+          const pct = Math.round((evt.progress ?? 0) * 100)
+          
+          // Only update if progress actually changed (prevents glitchy progress bar)
+          if (pct !== lastProgress) {
+            lastProgress = pct
+            console.log(`[useModelLoader] Download progress: ${pct}%`)
+            setState(prev => ({ ...prev, progress: pct }))
+          }
+        }
+      })
+
+      await ModelManager.downloadModel(modelId)
+      unsub()
+      console.log(`[useModelLoader] ✅ Download complete for "${modelId}"`)
+
+      setState({ status: 'loading', progress: 100, error: null, isCached: true })
+      console.log(`[useModelLoader] 🚀 Loading "${modelId}" into memory...`)
+
+      // Use coexist: true so multiple models stay in memory (needed for voice)
+      await ModelManager.loadModel(modelId, { coexist: true } as any)
+
+      console.log(`[useModelLoader] ✅ Model "${modelId}" ready!`)
+      setState({ status: 'ready', progress: 100, error: null, isCached: true })
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      console.error(`[useModelLoader] ❌ Error loading "${modelId}":`, message)
+      setState({ status: 'error', progress: 0, error: message, isCached: false })
+    }
+  }, [modelId])
+
+  return { state, downloadAndLoad }
 }

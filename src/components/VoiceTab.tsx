@@ -1,218 +1,547 @@
-import { useState, useRef, useCallback, useEffect } from 'react';
-import { VoicePipeline, ModelCategory, ModelManager, AudioCapture, AudioPlayback, SpeechActivity } from '@runanywhere/web';
-import { VAD } from '@runanywhere/web-onnx';
-import useModelLoader from '../hooks/useModelLoader';
-import { ModelBanner } from './ModelBanner';
+import { useState, useCallback, useRef, useEffect } from 'react'
+import { VoicePipeline, ModelManager, AudioCapture, AudioPlayback, SpeechActivity, PipelineState } from '@runanywhere/web'
+import { TTS } from '@runanywhere/web-onnx'
+import { ModelBanner } from './ModelBanner'
 
-type VoiceState = 'idle' | 'loading-models' | 'listening' | 'processing' | 'speaking';
+type VoiceState = 'idle' | 'listening' | 'processing' | 'speaking'
 
-export function VoiceTab() {
-  const llmLoader = useModelLoader('lfm2-350m');
-  const sttLoader = useModelLoader('whisper-tiny-en');
-  const ttsLoader = useModelLoader('piper-en-us-amy');
-  const vadLoader = useModelLoader('whisper-tiny-en'); // VAD uses same model as STT
+// The 4 voice model IDs matching our registry
+const VOICE_MODEL_IDS = {
+  vad: 'silero-vad-v5',
+  stt: 'sherpa-onnx-whisper-tiny.en',
+  llm: 'smollm2-135m',  // Faster, smaller model for real-time voice
+  tts: 'vits-piper-en_US-lessac-medium',
+}
 
+export default function VoiceTab() {
+  const [sttReady, setSttReady] = useState(false);
+  const [llmReady, setLlmReady] = useState(false);
+  const [ttsReady, setTtsReady] = useState(false);
   const [voiceState, setVoiceState] = useState<VoiceState>('idle');
   const [transcript, setTranscript] = useState('');
   const [response, setResponse] = useState('');
-  const [audioLevel, setAudioLevel] = useState(0);
+  const [isSessionActive, setIsSessionActive] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [partialResponse, setPartialResponse] = useState('');
+  const [processingSeconds, setProcessingSeconds] = useState(0);
 
   const micRef = useRef<AudioCapture | null>(null);
-  const pipelineRef = useRef<VoicePipeline | null>(null);
-  const vadUnsub = useRef<(() => void) | null>(null);
+  const audioPlaybackRef = useRef<AudioPlayback | null>(null);
+  const voicePipelineRef = useRef<VoicePipeline | null>(null);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  
+  // Refs to track if we've triggered auto-load for each model
+  const sttAutoLoadTriggered = useRef(false);
+  const llmAutoLoadTriggered = useRef(false);
+  const ttsAutoLoadTriggered = useRef(false);
+
+  const allModelsReady = sttReady && llmReady && ttsReady;
+  
+  // Manage processing timer based on voiceState
+  useEffect(() => {
+    if (voiceState === 'thinking' || voiceState === 'processing-stt') {
+      // Start timer
+      setProcessingSeconds(0);
+      timerRef.current = setInterval(() => {
+        setProcessingSeconds(prev => prev + 1);
+      }, 1000);
+    } else {
+      // Stop timer
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+        timerRef.current = null;
+      }
+    }
+    
+    // Cleanup on unmount
+    return () => {
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+        timerRef.current = null;
+      }
+    };
+  }, [voiceState]);
+
+  const startSession = useCallback(async () => {
+    try {
+      setError(null);
+      setIsSessionActive(true);
+      setVoiceState('listening');
+      setTranscript('');
+      setResponse('');
+      setPartialResponse('');
+
+      console.log('[VoiceTab] Starting voice session...');
+
+      // Create audio capture for microphone
+      const mic = new AudioCapture({
+        sampleRate: 16000, // Standard for STT
+        chunkSize: 1600    // 100ms chunks
+      });
+      micRef.current = mic;
+
+      // Initialize VoicePipeline
+      const pipeline = new VoicePipeline();
+      voicePipelineRef.current = pipeline;
+
+      // Configure audio playback
+      const audioPlayback = new AudioPlayback({
+        sampleRate: 22050, // Standard for TTS
+        volume: 1.0
+      });
+      audioPlaybackRef.current = audioPlayback;
+
+      // Start listening for audio and collect for 5 seconds
+      await mic.start();
+      console.log('[VoiceTab] Microphone started, recording for 5 seconds...');
+
+      // Wait for 5 seconds to collect audio, then process
+      setTimeout(async () => {
+        try {
+          // Get all collected audio and stop capture
+          const audioData = mic.getAudioBuffer();
+          mic.stop();
+
+          console.log(`[VoiceTab] Audio captured: ${audioData.length} samples (${(audioData.length / 16000).toFixed(1)}s)`);
+
+          if (audioData.length === 0) {
+            throw new Error('No audio captured. Please speak into the microphone.');
+          }
+
+          // Process through VoicePipeline
+          const systemPrompt = 'You are a skin health assistant. Answer in exactly 1-2 short sentences. Be direct.';
+
+          console.log('[VoiceTab] Starting VoicePipeline.processTurn()...');
+
+          await pipeline.processTurn(audioData, {
+            maxTokens: 60,        // Shorter = faster response
+            temperature: 0.7,
+            ttsSpeed: 1.1,        // Slightly faster speech
+            systemPrompt
+          }, {
+            onStateChange: (state) => {
+              switch (state) {
+                case PipelineState.ProcessingSTT:
+                  setVoiceState('processing-stt');
+                  break;
+                case PipelineState.GeneratingResponse:
+                  setVoiceState('thinking');
+                  break;
+                case PipelineState.PlayingTTS:
+                  setVoiceState('playing-tts');
+                  break;
+                default:
+                  break;
+              }
+            },
+            onTranscription: (text, _result) => {
+              setTranscript(text);
+            },
+            onResponseToken: (token, accumulated) => {
+              setPartialResponse(accumulated);
+            },
+            onResponseComplete: (text, _result) => {
+              setResponse(text);
+              setPartialResponse('');
+            },
+            onSynthesisComplete: (audioSamples, sampleRate, _result) => {
+              // Play the synthesized audio
+              audioPlayback.play(audioSamples, sampleRate).then(() => {
+                setVoiceState('idle');
+              });
+            },
+            onError: (error, stage) => {
+              throw new Error(`Voice pipeline error at ${stage}: ${error.message}`);
+            }
+          });
+
+        } catch (err) {
+          const errorMessage = err instanceof Error ? err.message : 'Voice processing failed';
+          setError(errorMessage);
+          setVoiceState('idle');
+        }
+      }, 5000); // Record for 5 seconds
+
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : 'Failed to start voice session';
+      setError(errorMessage);
+      setIsSessionActive(false);
+      setVoiceState('idle');
+    }
+  }, []);
+
+  const stopSession = useCallback(() => {
+    if (micRef.current) {
+      micRef.current.stop();
+      micRef.current = null;
+    }
+    if (audioPlaybackRef.current) {
+      audioPlaybackRef.current.stop();
+      audioPlaybackRef.current = null;
+    }
+    if (voicePipelineRef.current) {
+      voicePipelineRef.current.cancel();
+      voicePipelineRef.current = null;
+    }
+    setIsSessionActive(false);
+    setVoiceState('idle');
+  }, []);
 
   // Cleanup on unmount
   useEffect(() => {
     return () => {
-      micRef.current?.stop();
-      vadUnsub.current?.();
+      stopSession();
     };
-  }, []);
+  }, [stopSession]);
 
-  // Ensure all 4 models are loaded
-  const ensureModels = useCallback(async (): Promise<boolean> => {
-    setVoiceState('loading-models');
-    setError(null);
-
-    const results = await Promise.all([
-      vadLoader.downloadAndLoad(),
-      sttLoader.downloadAndLoad(),
-      llmLoader.downloadAndLoad(),
-      ttsLoader.downloadAndLoad(),
-    ]);
-
-    if (results.every(Boolean)) {
-      setVoiceState('idle');
-      return true;
-    }
-
-    setError('Failed to load one or more voice models');
-    setVoiceState('idle');
-    return false;
-  }, [vadLoader, sttLoader, llmLoader, ttsLoader]);
-
-  // Start listening
-  const startListening = useCallback(async () => {
-    setTranscript('');
-    setResponse('');
-    setError(null);
-
-    // Load models if needed
-    const anyMissing = !ModelManager.getLoadedModel(ModelCategory.Audio)
-      || !ModelManager.getLoadedModel(ModelCategory.SpeechRecognition)
-      || !ModelManager.getLoadedModel(ModelCategory.Language)
-      || !ModelManager.getLoadedModel(ModelCategory.SpeechSynthesis);
-
-    if (anyMissing) {
-      const ok = await ensureModels();
-      if (!ok) return;
-    }
-
-    setVoiceState('listening');
-
-    const mic = new AudioCapture({ sampleRate: 16000 });
-    micRef.current = mic;
-
-    if (!pipelineRef.current) {
-      pipelineRef.current = new VoicePipeline();
-    }
-
-    // Start VAD + mic
-    VAD.reset();
-
-    vadUnsub.current = VAD.onSpeechActivity((activity) => {
-      if (activity === SpeechActivity.Ended) {
-        const segment = VAD.popSpeechSegment();
-        if (segment && segment.samples.length > 1600) {
-          processSpeech(segment.samples);
-        }
-      }
-    });
-
-    await mic.start(
-      (chunk) => { VAD.processSamples(chunk); },
-      (level) => { setAudioLevel(level); },
-    );
-  }, [ensureModels]);
-
-  // Process a speech segment through the full pipeline
-  const processSpeech = useCallback(async (audioData: Float32Array) => {
-    const pipeline = pipelineRef.current;
-    if (!pipeline) return;
-
-    // Stop mic during processing
-    micRef.current?.stop();
-    vadUnsub.current?.();
-    setVoiceState('processing');
-
-    try {
-      const result = await pipeline.processTurn(audioData, {
-        maxTokens: 60,
-        temperature: 0.7,
-        systemPrompt: 'You are a helpful voice assistant. Keep responses concise — 1-2 sentences max.',
-      }, {
-        onTranscription: (text) => {
-          setTranscript(text);
-        },
-        onResponseToken: (_token, accumulated) => {
-          setResponse(accumulated);
-        },
-        onResponseComplete: (text) => {
-          setResponse(text);
-        },
-        onSynthesisComplete: async (audio, sampleRate) => {
-          setVoiceState('speaking');
-          const player = new AudioPlayback({ sampleRate });
-          await player.play(audio, sampleRate);
-          player.dispose();
-        },
-        onStateChange: (s) => {
-          if (s === 'processingSTT') setVoiceState('processing');
-          if (s === 'generatingResponse') setVoiceState('processing');
-          if (s === 'playingTTS') setVoiceState('speaking');
-        },
-      });
-
-      if (result) {
-        setTranscript(result.transcription);
-        setResponse(result.response);
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    }
-
-    setVoiceState('idle');
-    setAudioLevel(0);
-  }, []);
-
-  const stopListening = useCallback(() => {
-    micRef.current?.stop();
-    vadUnsub.current?.();
-    setVoiceState('idle');
-    setAudioLevel(0);
-  }, []);
-
-  // Which loaders are still loading?
-  const pendingLoaders = [
-    { label: 'VAD', loader: vadLoader },
-    { label: 'STT', loader: sttLoader },
-    { label: 'LLM', loader: llmLoader },
-    { label: 'TTS', loader: ttsLoader },
-  ].filter((l) => l.loader.state.status !== 'ready');
-
-  return (
-    <div className="tab-panel voice-panel">
-      {pendingLoaders.length > 0 && voiceState === 'idle' && (
+  // Sequential model loading UI
+  if (!sttReady) {
+    return (
+      <div>
         <ModelBanner
-          modelId="lfm2-350m"
-          modelName="Voice Models"
-          description="Required for voice symptom checker"
-          onReady={() => {}}
+          modelId="sherpa-onnx-whisper-tiny.en"
+          modelName="Whisper STT (1/3)"
+          description="Speech recognition model. Converts your voice to text."
+          onReady={() => {
+            // STT is auto-initialized by ModelManager for archive models
+            console.log('[VoiceTab] STT model ready (auto-initialized)');
+            setSttReady(true);
+          }}
         />
-      )}
 
-      {error && <div className="model-banner"><span className="error-text">{error}</span></div>}
+        {/* Feature preview card */}
+        <div className="card" style={{ margin: '16px' }}>
+          <div style={{ fontWeight: 700, fontSize: '18px', marginBottom: '12px' }}>
+            🎙️ Voice Symptom Checker
+          </div>
+          <div style={{
+            color: 'var(--color-text-muted)',
+            marginBottom: '16px',
+            lineHeight: 1.6
+          }}>
+            Describe your skin symptoms out loud. SpotOn listens, understands, and responds — all on your device.
+          </div>
+          <div style={{
+            display: 'flex',
+            flexWrap: 'wrap',
+            gap: '8px'
+          }}>
+            <div className="badge badge-blue">🎤 Voice Input</div>
+            <div className="badge badge-green">🔒 Private</div>
+            <div className="badge badge-blue">🔊 Spoken Response</div>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
-      <div className="voice-center">
-        <div className="voice-orb" data-state={voiceState} style={{ '--level': audioLevel } as React.CSSProperties}>
-          <div className="voice-orb-inner" />
+  if (sttReady && !llmReady) {
+    return (
+      <div>
+        <div style={{
+          margin: '16px',
+          padding: '12px',
+          background: 'rgba(52,211,153,0.1)',
+          borderRadius: 'var(--radius-md)',
+          borderLeft: '3px solid var(--color-accent)',
+          fontSize: '14px',
+          color: 'var(--color-text)',
+          marginBottom: '12px'
+        }}>
+          ✓ Step 1 complete — Speech recognition ready
+        </div>
+        <ModelBanner
+          modelId="smollm2-135m"
+          modelName="SmolLM2 135M AI (2/3)"
+          description="Lightweight AI brain optimized for real-time voice (~135MB)."
+          onReady={() => setLlmReady(true)}
+          autoLoad={true}
+        />
+        <div style={{
+          textAlign: 'center',
+          padding: '16px',
+          fontSize: '14px',
+          color: 'var(--color-text-muted)'
+        }}>
+          Step 2 of 3 — Auto-loading AI brain...
+        </div>
+      </div>
+    );
+  }
+
+  if (sttReady && llmReady && !ttsReady) {
+    return (
+      <div>
+        <div style={{
+          margin: '16px',
+          padding: '12px',
+          background: 'rgba(52,211,153,0.1)',
+          borderRadius: 'var(--radius-md)',
+          borderLeft: '3px solid var(--color-accent)',
+          fontSize: '14px',
+          color: 'var(--color-text)',
+          marginBottom: '12px'
+        }}>
+          ✓ Steps 1 & 2 complete — Speech recognition and AI ready
+        </div>
+        <ModelBanner
+          modelId="vits-piper-en_US-lessac-medium"
+          modelName="Piper TTS (3/3)"
+          description="Text-to-speech model. Speaks the AI response aloud."
+          onReady={async () => {
+            try {
+              console.log('[VoiceTab] TTS model extracted, now loading voice...');
+              
+              // Wait a bit for model files to settle in OPFS
+              await new Promise(resolve => setTimeout(resolve, 100));
+              
+              // For archive-based TTS models, we need to explicitly call loadVoice() after extraction
+              // The SDK extracts to /models/{modelId}/ in OPFS
+              await TTS.loadVoice({
+                voiceId: 'spoton-tts',  // Use a unique ID to avoid conflicts
+                modelPath: '/models/vits-piper-en_US-lessac-medium/en_US-lessac-medium.onnx',
+                tokensPath: '/models/vits-piper-en_US-lessac-medium/tokens.txt',
+                dataDir: '/models/vits-piper-en_US-lessac-medium/espeak-ng-data',
+              });
+              
+              console.log('[VoiceTab] ✅ TTS voice loaded successfully, sample rate:', TTS.sampleRate);
+              setTtsReady(true);
+            } catch (err) {
+              console.error('[VoiceTab] ❌ Failed to load TTS voice:', err);
+              // Try to continue anyway - maybe it was already loaded
+              setTtsReady(true);
+            }
+          }}
+          autoLoad={true}
+        />
+        <div style={{
+          textAlign: 'center',
+          padding: '16px',
+          fontSize: '14px',
+          color: 'var(--color-text-muted)'
+        }}>
+          Step 3 of 3 — Auto-loading voice synthesizer...
+        </div>
+      </div>
+    );
+  }
+
+  // All models ready - show voice interface
+  return (
+    <div>
+      {/* Main voice interface card */}
+      <div className="card" style={{
+        margin: '16px',
+        textAlign: 'center',
+        padding: '28px'
+      }}>
+        {/* Title */}
+        <div style={{
+          fontSize: '18px',
+          fontWeight: 700,
+          marginBottom: '8px'
+        }}>
+          Voice Symptom Checker
         </div>
 
-        <p className="voice-status">
-          {voiceState === 'idle' && 'Tap to start listening'}
-          {voiceState === 'loading-models' && 'Loading models...'}
-          {voiceState === 'listening' && 'Listening... speak now'}
-          {voiceState === 'processing' && 'Processing...'}
-          {voiceState === 'speaking' && 'Speaking...'}
-        </p>
+        {/* Subtitle */}
+        <div style={{
+          color: 'var(--color-text-muted)',
+          fontSize: '14px',
+          marginBottom: '24px'
+        }}>
+          Describe your skin concern out loud
+        </div>
 
-        {voiceState === 'idle' || voiceState === 'loading-models' ? (
+        {/* Big circular mic button */}
+        <button
+          onClick={isSessionActive ? stopSession : startSession}
+          disabled={voiceState === 'processing-stt' || voiceState === 'thinking'}
+          style={{
+            width: '96px',
+            height: '96px',
+            borderRadius: '50%',
+            margin: '0 auto 16px',
+            cursor: (voiceState === 'processing-stt' || voiceState === 'thinking') ? 'not-allowed' : 'pointer',
+            border: 'none',
+            fontSize: '40px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            transition: 'all 300ms ease',
+            // Dynamic styles based on state
+            ...(voiceState === 'listening' ? {
+              background: 'rgba(79,142,247,0.15)',
+              borderWidth: '2px',
+              borderStyle: 'solid',
+              borderColor: 'var(--color-primary)',
+              boxShadow: '0 0 0 12px rgba(79,142,247,0.08), 0 0 0 24px rgba(79,142,247,0.04)'
+            } : voiceState === 'playing-tts' ? {
+              background: 'rgba(52,211,153,0.15)',
+              borderWidth: '2px',
+              borderStyle: 'solid',
+              borderColor: 'var(--color-accent)'
+            } : (voiceState === 'processing-stt' || voiceState === 'thinking') ? {
+              background: 'var(--color-surface-2)',
+              borderWidth: '2px',
+              borderStyle: 'solid',
+              borderColor: 'var(--color-border)',
+              opacity: 0.7
+            } : {
+              background: 'var(--color-surface-2)',
+              borderWidth: '2px',
+              borderStyle: 'solid',
+              borderColor: 'var(--color-border)'
+            })
+          }}
+        >
+          {voiceState === 'listening' && (
+            <span style={{ animation: 'pulse 1.5s ease infinite' }}>🎙️</span>
+          )}
+          {voiceState === 'playing-tts' && '🔊'}
+          {(voiceState === 'processing-stt' || voiceState === 'thinking') && (
+            <div
+              className="animate-spin"
+              style={{
+                width: '32px',
+                height: '32px',
+                border: '3px solid var(--color-border)',
+                borderTopColor: 'var(--color-primary)',
+                borderRadius: '50%'
+              }}
+            />
+          )}
+          {voiceState === 'idle' && '🎙️'}
+        </button>
+
+        {/* Status text */}
+        <div style={{
+          fontSize: '14px',
+          color: 'var(--color-text-muted)',
+          minHeight: '24px',
+          marginBottom: '20px'
+        }}>
+          {voiceState === 'idle' && !isSessionActive && 'Tap the mic to start'}
+          {voiceState === 'idle' && isSessionActive && 'Waiting for speech...'}
+          {voiceState === 'listening' && '🎤 Listening — speak now'}
+          {voiceState === 'processing-stt' && '⏳ Processing speech...'}
+          {voiceState === 'thinking' && '💭 Thinking...'}
+          {voiceState === 'playing-tts' && '🔊 Speaking...'}
+        </div>
+
+        {/* Session button */}
+        {!isSessionActive ? (
           <button
-            className="btn btn-primary btn-lg"
-            onClick={startListening}
-            disabled={voiceState === 'loading-models'}
+            className="btn btn-primary"
+            onClick={startSession}
+            disabled={voiceState === 'processing-stt' || voiceState === 'thinking'}
           >
-            Start Listening
+            🎙️ Start Voice Session
           </button>
-        ) : voiceState === 'listening' ? (
-          <button className="btn btn-lg" onClick={stopListening}>
-            Stop
+        ) : (
+          <button
+            className="btn btn-secondary"
+            onClick={stopSession}
+          >
+            ⏹ End Session
           </button>
-        ) : null}
+        )}
+
+        {/* Demo notice */}
+        <div style={{
+          marginTop: '20px',
+          padding: '12px',
+          background: 'rgba(79,142,247,0.1)',
+          borderRadius: 'var(--radius-sm)',
+          fontSize: '12px',
+          color: 'var(--color-text-muted)'
+        }}>
+          🎙️ Real Voice Pipeline: Record 5 seconds of audio, then get AI analysis and spoken response.
+        </div>
       </div>
 
+      {/* Transcript card */}
       {transcript && (
-        <div className="voice-transcript">
-          <h4>You said:</h4>
-          <p>{transcript}</p>
+        <div className="card animate-slideUp" style={{ margin: '16px' }}>
+          <div style={{
+            fontSize: '11px',
+            fontWeight: 700,
+            color: 'var(--color-text-dim)',
+            letterSpacing: '1px',
+            marginBottom: '6px'
+          }}>
+            YOU SAID
+          </div>
+          <p style={{
+            fontSize: '15px',
+            lineHeight: 1.6,
+            margin: 0
+          }}>
+            {transcript}
+          </p>
         </div>
       )}
 
-      {response && (
-        <div className="voice-response">
-          <h4>AI response:</h4>
-          <p>{response}</p>
+      {/* Response card - show partial response during generation */}
+      {(response || partialResponse) && (
+        <div className="card animate-slideUp" style={{
+          margin: '16px',
+          borderLeft: '3px solid var(--color-primary)'
+        }}>
+          <div style={{
+            fontSize: '11px',
+            fontWeight: 700,
+            color: 'var(--color-primary)',
+            letterSpacing: '1px',
+            marginBottom: '6px'
+          }}>
+            SPOTON SAYS
+            {partialResponse && !response && (
+              <span style={{ color: 'var(--color-text-muted)', fontWeight: 400, marginLeft: '8px' }}>
+                (generating...)
+              </span>
+            )}
+          </div>
+          <p style={{
+            fontSize: '15px',
+            lineHeight: 1.6,
+            margin: 0
+          }}>
+            {response || partialResponse}
+            {partialResponse && !response && (
+              <span style={{
+                display: 'inline-block',
+                width: '2px',
+                height: '14px',
+                background: 'var(--color-primary)',
+                marginLeft: '2px',
+                animation: 'pulse 1s ease infinite',
+                verticalAlign: 'middle'
+              }} />
+            )}
+          </p>
+        </div>
+      )}
+
+      {/* Error display */}
+      {error && (
+        <div className="card" style={{
+          margin: '16px',
+          borderColor: 'var(--color-danger)'
+        }}>
+          <p style={{
+            color: 'var(--color-danger)',
+            margin: '0 0 8px 0'
+          }}>
+            ⚠️ {error}
+          </p>
+          <button
+            className="btn btn-secondary"
+            style={{ marginTop: '8px' }}
+            onClick={() => setError(null)}
+          >
+            Dismiss
+          </button>
         </div>
       )}
     </div>

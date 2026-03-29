@@ -19,6 +19,38 @@ npm run dev
 
 Open [http://localhost:5173](http://localhost:5173). Models are downloaded on first use and cached in the browser's Origin Private File System (OPFS).
 
+## 🔌 Offline Capability
+
+**SpotOn works 100% offline after initial model download.**
+
+### First-time setup (requires internet):
+1. Open the app with WiFi/internet connected
+2. Navigate to the Scan tab
+3. Click "Download Model (~500MB)" 
+4. **Keep internet connected until progress reaches 100%**
+5. Model is now cached permanently in browser storage (OPFS)
+
+### After caching (works offline):
+- ✅ No internet needed to reload the website
+- ✅ All AI runs locally in your browser
+- ✅ Camera scanning works completely offline
+- ✅ Models persist across browser sessions
+- ✅ Only cleared when you manually clear browser data
+
+### Checking cache status:
+Open browser console and run:
+```javascript
+window.checkModelCache()
+```
+
+This shows which models are cached and ready for offline use.
+
+### Important notes:
+- **Interrupted downloads don't cache** — if WiFi disconnects during download, you'll need to retry
+- **~500MB storage required** for the vision model
+- **Cache survives tab/browser closes** — it's permanent until you clear site data
+- **First load is slow** — subsequent loads are instant (loading from cache, not downloading)
+
 ## How It Works
 
 ```

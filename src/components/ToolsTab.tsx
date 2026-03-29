@@ -292,7 +292,7 @@ export function ToolsTab() {
   return (
     <div className="tab-panel tools-panel">
       <ModelBanner
-        modelId="lfm2-350m"
+        modelId="lfm2-350m-q4_k_m"
         modelName="LFM2 350M (Tools)"
         description="Required for tool calling features"
         onReady={() => {}}

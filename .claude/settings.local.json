@@ -5,7 +5,9 @@
       "Bash(npm run:*)",
       "Bash(npm install:*)",
       "WebFetch(domain:docs.runanywhere.ai)",
-      "Bash(npm list:*)"
+      "Bash(npm list:*)",
+      "Bash(cd:*)",
+      "Bash(xargs grep:*)"
     ]
   }
 }

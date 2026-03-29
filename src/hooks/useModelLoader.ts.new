@@ -1,0 +1,45 @@
+import { useState, useCallback } from 'react'
+import { ModelManager, EventBus } from '@runanywhere/web'
+
+export interface ModelLoaderState {
+  status: 'idle' | 'downloading' | 'loading' | 'ready' | 'error'
+  progress: number
+  error: string | null
+}
+
+export default function useModelLoader(modelId: string) {
+  const [state, setState] = useState<ModelLoaderState>({
+    status: 'idle',
+    progress: 0,
+    error: null,
+  })
+
+  const downloadAndLoad = useCallback(async () => {
+    try {
+      setState({ status: 'downloading', progress: 0, error: null })
+
+      // Listen to download progress via EventBus
+      const unsub = EventBus.shared.on('model.downloadProgress', (evt: any) => {
+        if (evt.modelId === modelId) {
+          const pct = Math.round((evt.progress ?? 0) * 100)
+          setState(prev => ({ ...prev, progress: pct }))
+        }
+      })
+
+      await ModelManager.downloadModel(modelId)
+      unsub()
+
+      setState({ status: 'loading', progress: 100, error: null })
+
+      // Use coexist: true so multiple models stay in memory (needed for voice)
+      await ModelManager.loadModel(modelId, { coexist: true } as any)
+
+      setState({ status: 'ready', progress: 100, error: null })
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      setState({ status: 'error', progress: 0, error: message })
+    }
+  }, [modelId])
+
+  return { state, downloadAndLoad }
+}

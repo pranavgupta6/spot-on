@@ -1,49 +1,91 @@
-import { useState, useRef, useEffect, useCallback } from 'react';
-import { ModelCategory } from '@runanywhere/web';
+import { useState, useRef, useEffect } from 'react';
 import { TextGeneration } from '@runanywhere/web-llamacpp';
-import useModelLoader from '../hooks/useModelLoader';
 import { ModelBanner } from './ModelBanner';
 
 interface Message {
   role: 'user' | 'assistant';
-  text: string;
-  stats?: { tokens: number; tokPerSec: number; latencyMs: number };
+  content: string;
+  id: string;
 }
 
 export function ChatTab() {
-  const loader = useModelLoader(ModelCategory.Language);
+  const [modelReady, setModelReady] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
-  const [input, setInput] = useState('');
-  const [generating, setGenerating] = useState(false);
+  const [inputValue, setInputValue] = useState('');
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const cancelRef = useRef<(() => void) | null>(null);
-  const listRef = useRef<HTMLDivElement>(null);
 
   // Auto-scroll to bottom when messages change
   useEffect(() => {
-    listRef.current?.scrollTo({ top: listRef.current.scrollHeight, behavior: 'smooth' });
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  const send = useCallback(async () => {
-    const text = input.trim();
-    if (!text || generating) return;
+  // Auto-resize textarea
+  const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    setInputValue(e.target.value);
 
-    // Ensure model is loaded
-    if (loader.state.status !== 'ready') {
-      await loader.downloadAndLoad();
-      if (loader.state.status === 'error') return;
+    // Auto-resize height
+    const textarea = e.target;
+    textarea.style.height = 'auto';
+    textarea.style.height = Math.min(textarea.scrollHeight, 120) + 'px';
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+  };
+
+  const sendMessage = async () => {
+    if (inputValue.trim() === '' || isGenerating || !modelReady) return;
+
+    const userMessage = inputValue.trim();
+    const userMsg: Message = {
+      role: 'user',
+      content: userMessage,
+      id: crypto.randomUUID()
+    };
+
+    // Add user message
+    setMessages(prev => [...prev, userMsg]);
+    setInputValue('');
+    setIsGenerating(true);
+    setError(null);
+
+    // Reset textarea height
+    if (textareaRef.current) {
+      textareaRef.current.style.height = '44px';
     }
 
-    setInput('');
-    setMessages((prev) => [...prev, { role: 'user', text }]);
-    setGenerating(true);
-
     // Add empty assistant message for streaming
-    const assistantIdx = messages.length + 1;
-    setMessages((prev) => [...prev, { role: 'assistant', text: '' }]);
+    const assistantMsg: Message = {
+      role: 'assistant',
+      content: '',
+      id: crypto.randomUUID()
+    };
+    setMessages(prev => [...prev, assistantMsg]);
 
     try {
-      const { stream, result: resultPromise, cancel } = await TextGeneration.generateStream(text, {
-        maxTokens: 512,
+      const systemPrompt = `You are SpotOn's AI dermatology assistant.
+Help users understand skin conditions, symptoms, and when to seek medical care.
+Be clear, empathetic, and concise. Keep responses under 150 words.
+Never provide a definitive diagnosis — always recommend consulting a
+dermatologist for anything concerning. You are here to educate and
+reassure, not to replace medical advice.`;
+
+      const conversationHistory = messages
+        .map(m => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`)
+        .join('\n');
+
+      const fullPrompt = `${systemPrompt}\n\nConversation:\n${conversationHistory}\nUser: ${userMessage}\nAssistant:`;
+
+      const { stream, cancel } = await TextGeneration.generateStream(fullPrompt, {
+        maxTokens: 300,
         temperature: 0.7,
       });
       cancelRef.current = cancel;
@@ -51,91 +93,277 @@ export function ChatTab() {
       let accumulated = '';
       for await (const token of stream) {
         accumulated += token;
-        setMessages((prev) => {
+        setMessages(prev => {
           const updated = [...prev];
-          updated[assistantIdx] = { role: 'assistant', text: accumulated };
+          updated[updated.length - 1] = {
+            ...updated[updated.length - 1],
+            content: accumulated
+          };
           return updated;
         });
       }
 
-      const result = await resultPromise;
-      setMessages((prev) => {
-        const updated = [...prev];
-        updated[assistantIdx] = {
-          role: 'assistant',
-          text: result.text || accumulated,
-          stats: {
-            tokens: result.tokensUsed,
-            tokPerSec: result.tokensPerSecond,
-            latencyMs: result.latencyMs,
-          },
-        };
-        return updated;
-      });
+      setIsGenerating(false);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      setMessages((prev) => {
-        const updated = [...prev];
-        updated[assistantIdx] = { role: 'assistant', text: `Error: ${msg}` };
-        return updated;
-      });
-    } finally {
-      cancelRef.current = null;
-      setGenerating(false);
-    }
-  }, [input, generating, messages.length, loader]);
+      const errorMessage = err instanceof Error ? err.message : 'Failed to generate response';
+      setError(errorMessage);
+      setIsGenerating(false);
 
-  const handleCancel = () => {
-    cancelRef.current?.();
+      // Remove empty assistant message on error
+      setMessages(prev => prev.slice(0, -1));
+    }
   };
 
-  return (
-    <div className="tab-panel chat-panel">
-      <ModelBanner
-        modelId="lfm2-350m"
-        modelName="LFM2 350M (Chat)"
-        description="Required for AI dermatology chat"
-        onReady={() => {}}
-      />
+  const handleSuggestionClick = (suggestion: string) => {
+    setInputValue(suggestion);
+    // Auto-send after setting the suggestion
+    setTimeout(() => sendMessage(), 0);
+  };
 
-      <div className="message-list" ref={listRef}>
-        {messages.length === 0 && (
-          <div className="empty-state">
-            <h3>Start a conversation</h3>
-            <p>Type a message below to chat with on-device AI</p>
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      cancelRef.current?.();
+    };
+  }, []);
+
+  if (!modelReady) {
+    return (
+      <div>
+        <ModelBanner
+          modelId="lfm2-350m-q4_k_m"
+          modelName="LFM2 350M Chat Model"
+          description="Required for AI dermatology chat. ~250MB, downloaded once."
+          onReady={() => setModelReady(true)}
+        />
+
+        {/* Feature preview card */}
+        <div className="card" style={{ margin: '16px' }}>
+          <div style={{ fontWeight: 700, fontSize: '18px', marginBottom: '12px' }}>
+            💬 AI Derma Chat
           </div>
-        )}
-        {messages.map((msg, i) => (
-          <div key={i} className={`message message-${msg.role}`}>
-            <div className="message-bubble">
-              <p>{msg.text || '...'}</p>
-              {msg.stats && (
-                <div className="message-stats">
-                  {msg.stats.tokens} tokens · {msg.stats.tokPerSec.toFixed(1)} tok/s · {msg.stats.latencyMs.toFixed(0)}ms
-                </div>
-              )}
+          <div style={{
+            color: 'var(--color-text-muted)',
+            marginBottom: '16px',
+            lineHeight: 1.6
+          }}>
+            Ask anything about skin conditions, symptoms, or skincare. Powered by on-device AI — completely private.
+          </div>
+          <div style={{
+            display: 'flex',
+            flexWrap: 'wrap',
+            gap: '8px'
+          }}>
+            <div className="badge badge-green">🔒 Private</div>
+            <div className="badge badge-blue">⚡ On-device</div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{
+      display: 'flex',
+      flexDirection: 'column',
+      height: '100%',
+      padding: 0
+    }}>
+      {/* Messages area */}
+      <div style={{
+        flex: 1,
+        overflowY: 'auto',
+        padding: '16px',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '12px'
+      }}>
+        {messages.length === 0 ? (
+          // Welcome state
+          <div style={{ textAlign: 'center', color: 'var(--color-text-muted)' }}>
+            <div style={{ fontSize: '32px', marginBottom: '16px' }}>👋</div>
+            <div style={{ fontSize: '18px', fontWeight: 600, marginBottom: '8px' }}>
+              Hi! I'm your skin health assistant
+            </div>
+            <div style={{ fontSize: '14px', lineHeight: 1.5, marginBottom: '16px' }}>
+              Ask me about acne, eczema, rashes, moles, or any skin concern.
+              I'll help you understand what you might be dealing with.
+            </div>
+
+            {/* Suggestion chips */}
+            <div style={{
+              display: 'flex',
+              flexWrap: 'wrap',
+              gap: '8px',
+              justifyContent: 'center',
+              marginTop: '16px'
+            }}>
+              {[
+                'What causes acne?',
+                'Is my mole concerning?',
+                'How do I treat dry skin?'
+              ].map(suggestion => (
+                <button
+                  key={suggestion}
+                  onClick={() => handleSuggestionClick(suggestion)}
+                  style={{
+                    padding: '8px 14px',
+                    background: 'var(--color-surface-2)',
+                    border: '1px solid var(--color-border)',
+                    borderRadius: 'var(--radius-full)',
+                    fontSize: '13px',
+                    cursor: 'pointer',
+                    color: 'var(--color-text-muted)',
+                    transition: 'var(--transition)'
+                  }}
+                >
+                  {suggestion}
+                </button>
+              ))}
             </div>
           </div>
-        ))}
+        ) : (
+          // Messages
+          messages.map((message, index) => (
+            <div
+              key={message.id}
+              className="animate-slideUp"
+              style={{
+                alignSelf: message.role === 'user' ? 'flex-end' : 'flex-start',
+                maxWidth: message.role === 'user' ? '80%' : '85%',
+                background: message.role === 'user'
+                  ? 'var(--color-primary)'
+                  : 'var(--color-surface-2)',
+                color: message.role === 'user' ? 'white' : 'var(--color-text)',
+                padding: '10px 14px',
+                borderRadius: message.role === 'user'
+                  ? '18px 18px 4px 18px'
+                  : '18px 18px 18px 4px',
+                fontSize: '14px',
+                lineHeight: 1.5,
+                border: message.role === 'assistant' ? '1px solid var(--color-border)' : 'none'
+              }}
+            >
+              {message.content}
+              {/* Blinking cursor for last assistant message while generating */}
+              {message.role === 'assistant' &&
+               index === messages.length - 1 &&
+               isGenerating && (
+                <span style={{
+                  display: 'inline-block',
+                  width: '2px',
+                  height: '14px',
+                  background: 'var(--color-primary)',
+                  marginLeft: '2px',
+                  animation: 'pulse 1s ease infinite',
+                  verticalAlign: 'middle'
+                }} />
+              )}
+            </div>
+          ))
+        )}
+
+        {/* Typing indicator */}
+        {isGenerating && messages.length > 0 && messages[messages.length - 1].role === 'user' && (
+          <div style={{
+            alignSelf: 'flex-start',
+            background: 'var(--color-surface-2)',
+            border: '1px solid var(--color-border)',
+            padding: '10px 14px',
+            borderRadius: '18px',
+            display: 'flex',
+            gap: '4px',
+            alignItems: 'center'
+          }}>
+            {[0, 150, 300].map((delay, i) => (
+              <div
+                key={i}
+                className="animate-pulse"
+                style={{
+                  width: '6px',
+                  height: '6px',
+                  borderRadius: '50%',
+                  background: 'var(--color-text-dim)',
+                  animationDelay: `${delay}ms`
+                }}
+              />
+            ))}
+          </div>
+        )}
+
+        {/* Error display */}
+        {error && (
+          <div className="card" style={{ borderColor: 'var(--color-danger)', margin: 0 }}>
+            <div style={{ color: 'var(--color-danger)', fontSize: '14px' }}>
+              ⚠️ {error}
+            </div>
+          </div>
+        )}
+
+        <div ref={messagesEndRef} />
       </div>
 
-      <form
-        className="chat-input"
-        onSubmit={(e) => { e.preventDefault(); send(); }}
-      >
-        <input
-          type="text"
-          placeholder="Message..."
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          disabled={generating}
+      {/* Input area */}
+      <div style={{
+        position: 'sticky',
+        bottom: 0,
+        background: 'var(--color-bg)',
+        borderTop: '1px solid var(--color-border)',
+        padding: '12px 16px',
+        display: 'flex',
+        gap: '8px',
+        alignItems: 'flex-end'
+      }}>
+        <textarea
+          ref={textareaRef}
+          className="input"
+          style={{
+            flex: 1,
+            resize: 'none',
+            minHeight: '44px',
+            maxHeight: '120px',
+            overflowY: 'auto'
+          }}
+          rows={1}
+          placeholder="Ask about a skin condition..."
+          value={inputValue}
+          onChange={handleInputChange}
+          onKeyDown={handleKeyDown}
+          disabled={isGenerating}
         />
-        {generating ? (
-          <button type="button" className="btn" onClick={handleCancel}>Stop</button>
-        ) : (
-          <button type="submit" className="btn btn-primary" disabled={!input.trim()}>Send</button>
-        )}
-      </form>
+
+        <button
+          className="btn btn-primary"
+          style={{
+            width: '44px',
+            height: '44px',
+            padding: 0,
+            borderRadius: '50%',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center'
+          }}
+          onClick={sendMessage}
+          disabled={isGenerating || inputValue.trim() === ''}
+        >
+          {isGenerating ? (
+            <div
+              className="animate-spin"
+              style={{
+                width: '16px',
+                height: '16px',
+                border: '2px solid rgba(255,255,255,0.3)',
+                borderTopColor: 'white',
+                borderRadius: '50%'
+              }}
+            />
+          ) : (
+            '➤'
+          )}
+        </button>
+      </div>
     </div>
   );
 }
+
+export default ChatTab;

@@ -7,14 +7,22 @@ interface ModelBannerProps {
   modelName: string;
   description: string;   // e.g. "Required for skin scanning"
   onReady: () => void;
+  autoLoad?: boolean;    // If true, automatically start downloading on mount
 }
 
-export function ModelBanner({ modelId, modelName, description, onReady }: ModelBannerProps) {
+export function ModelBanner({ modelId, modelName, description, onReady, autoLoad = false }: ModelBannerProps) {
   const { state, downloadAndLoad } = useModelLoader(modelId);
 
   // Find the model to get memory requirement
   const model = MODELS.find(m => m.id === modelId);
   const sizeInMB = model?.memoryRequirement ? Math.round(model.memoryRequirement / 1_000_000) : 0;
+
+  // Auto-load on mount if autoLoad is true
+  useEffect(() => {
+    if (autoLoad && state.status === 'idle') {
+      downloadAndLoad();
+    }
+  }, [autoLoad, state.status, downloadAndLoad]);
 
   // Call onReady when model becomes ready
   useEffect(() => {
@@ -29,6 +37,22 @@ export function ModelBanner({ modelId, modelName, description, onReady }: ModelB
 
   return (
     <div className="card animate-slideUp" style={{ margin: '16px' }}>
+      {state.status === 'checking' && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+          <div
+            className="animate-spin"
+            style={{
+              width: '20px',
+              height: '20px',
+              border: '2px solid var(--color-border)',
+              borderTopColor: 'var(--color-primary)',
+              borderRadius: '50%'
+            }}
+          />
+          <span>Checking for cached model...</span>
+        </div>
+      )}
+
       {state.status === 'idle' && (
         <>
           {/* Top row: model name + size badge */}
@@ -46,9 +70,27 @@ export function ModelBanner({ modelId, modelName, description, onReady }: ModelB
             {description}
           </div>
 
+          {/* Important notice about internet requirement */}
+          <div style={{
+            background: 'rgba(79,142,247,0.1)',
+            borderLeft: '3px solid var(--color-primary)',
+            padding: '10px 12px',
+            borderRadius: '6px',
+            fontSize: '13px',
+            margin: '12px 0',
+            lineHeight: 1.5
+          }}>
+            <div style={{ fontWeight: 600, marginBottom: '4px', color: 'var(--color-primary)' }}>
+              ⚠️ First-time download requires internet
+            </div>
+            <div style={{ color: 'var(--color-text-muted)', fontSize: '12px' }}>
+              Keep WiFi connected during initial download. After that, works 100% offline.
+            </div>
+          </div>
+
           {/* Download button */}
           <button className="btn btn-primary w-full" onClick={downloadAndLoad}>
-            Download & Load Model
+            📥 Download Model (~{sizeInMB} MB)
           </button>
 
           {/* Small note */}
@@ -58,7 +100,7 @@ export function ModelBanner({ modelId, modelName, description, onReady }: ModelB
             textAlign: 'center',
             marginTop: '8px'
           }}>
-            ⚡ Downloaded once · Cached in browser · Works offline after
+            Downloaded once · Cached forever · Works offline after
           </div>
         </>
       )}
@@ -88,9 +130,33 @@ export function ModelBanner({ modelId, modelName, description, onReady }: ModelB
 
           <div style={{
             fontSize: '13px',
-            color: 'var(--color-text-muted)'
+            color: 'var(--color-text-muted)',
+            marginBottom: '12px'
           }}>
-            {state.progress}% — please keep this tab open
+            {state.progress}% complete
+          </div>
+
+          {/* WiFi warning */}
+          <div style={{
+            background: 'rgba(251,191,36,0.1)',
+            borderLeft: '3px solid var(--color-warning)',
+            padding: '10px 12px',
+            borderRadius: '6px',
+            fontSize: '12px',
+            lineHeight: 1.5,
+            display: 'flex',
+            alignItems: 'start',
+            gap: '8px'
+          }}>
+            <span style={{ fontSize: '16px' }}>📡</span>
+            <div>
+              <div style={{ fontWeight: 600, color: 'var(--color-warning)', marginBottom: '2px' }}>
+                Keep WiFi connected
+              </div>
+              <div style={{ color: 'var(--color-text-muted)' }}>
+                If interrupted, download will fail and need to restart. Model only caches after 100% completion.
+              </div>
+            </div>
           </div>
         </>
       )}
@@ -107,14 +173,27 @@ export function ModelBanner({ modelId, modelName, description, onReady }: ModelB
               borderRadius: '50%'
             }}
           />
-          <span>Loading model into memory...</span>
+          <div>
+            <div>Loading model into memory...</div>
+            {state.isCached && (
+              <div style={{
+                fontSize: '12px',
+                color: 'var(--color-accent)',
+                marginTop: '4px'
+              }}>
+                ✓ Using cached model · No download needed
+              </div>
+            )}
+          </div>
         </div>
       )}
 
       {state.status === 'error' && (
         <>
           <div style={{ color: 'var(--color-danger)', fontWeight: 600, marginBottom: '8px' }}>
-            ⚠️ Download failed
+            ⚠️ {state.error?.includes('fetch') || state.error?.includes('network') || state.error?.includes('Failed to fetch') 
+              ? 'Network error during download' 
+              : 'Download failed'}
           </div>
 
           <div style={{
@@ -125,8 +204,27 @@ export function ModelBanner({ modelId, modelName, description, onReady }: ModelB
             {state.error}
           </div>
 
+          {(state.error?.includes('fetch') || state.error?.includes('network') || state.error?.includes('Failed to fetch')) && (
+            <div style={{
+              background: 'rgba(248,113,113,0.1)',
+              borderLeft: '3px solid var(--color-danger)',
+              padding: '10px 12px',
+              borderRadius: '6px',
+              fontSize: '12px',
+              margin: '12px 0',
+              lineHeight: 1.5,
+              color: 'var(--color-text-muted)'
+            }}>
+              <div style={{ fontWeight: 600, marginBottom: '4px', color: 'var(--color-danger)' }}>
+                Internet connection required
+              </div>
+              Make sure you have a stable WiFi or data connection, then click Retry. 
+              The model must download completely before it can work offline.
+            </div>
+          )}
+
           <button className="btn btn-secondary" onClick={downloadAndLoad}>
-            Retry
+            🔄 Retry Download
           </button>
         </>
       )}
