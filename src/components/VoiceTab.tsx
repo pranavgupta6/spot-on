@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
-import { VoicePipeline, ModelManager, AudioCapture, AudioPlayback, SpeechActivity, PipelineState } from '@runanywhere/web'
+import { VoicePipeline, ModelManager, ModelCategory, AudioCapture, AudioPlayback, SpeechActivity, PipelineState } from '@runanywhere/web'
 import { TTS } from '@runanywhere/web-onnx'
 import { ModelBanner } from './ModelBanner'
 
@@ -9,11 +9,12 @@ type VoiceState = 'idle' | 'listening' | 'processing' | 'speaking'
 const VOICE_MODEL_IDS = {
   vad: 'silero-vad-v5',
   stt: 'sherpa-onnx-whisper-tiny.en',
-  llm: 'smollm2-135m',  // Faster, smaller model for real-time voice
+  llm: 'lfm2-350m-q4_k_m',  // Upgraded to LFM2 350M for better quality (same as Chat tab)
   tts: 'vits-piper-en_US-lessac-medium',
 }
 
 export default function VoiceTab() {
+  const [vadReady, setVadReady] = useState(false);
   const [sttReady, setSttReady] = useState(false);
   const [llmReady, setLlmReady] = useState(false);
   const [ttsReady, setTtsReady] = useState(false);
@@ -31,11 +32,12 @@ export default function VoiceTab() {
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   
   // Refs to track if we've triggered auto-load for each model
+  const vadAutoLoadTriggered = useRef(false);
   const sttAutoLoadTriggered = useRef(false);
   const llmAutoLoadTriggered = useRef(false);
   const ttsAutoLoadTriggered = useRef(false);
 
-  const allModelsReady = sttReady && llmReady && ttsReady;
+  const allModelsReady = vadReady && sttReady && llmReady && ttsReady;
   
   // Manage processing timer based on voiceState
   useEffect(() => {
@@ -72,6 +74,37 @@ export default function VoiceTab() {
       setPartialResponse('');
 
       console.log('[VoiceTab] Starting voice session...');
+
+      // CRITICAL: Ensure all 4 voice models are loaded before starting VoicePipeline
+      // Check each category and load the correct model if missing
+      const requiredModels = [
+        { category: ModelCategory.Audio, id: VOICE_MODEL_IDS.vad, name: 'VAD' },
+        { category: ModelCategory.SpeechRecognition, id: VOICE_MODEL_IDS.stt, name: 'STT' },
+        { category: ModelCategory.Language, id: VOICE_MODEL_IDS.llm, name: 'LLM' },
+        { category: ModelCategory.SpeechSynthesis, id: VOICE_MODEL_IDS.tts, name: 'TTS' },
+      ];
+
+      console.log('[VoiceTab] Checking voice models...');
+      
+      for (const { category, id, name } of requiredModels) {
+        const loaded = ModelManager.getLoadedModel(category);
+        
+        if (!loaded || loaded.id !== id) {
+          console.log(`[VoiceTab] ${name} model needs loading: ${loaded ? `wrong model (${loaded.id})` : 'not loaded'}`);
+          console.log(`[VoiceTab] Loading ${name} model: ${id}`);
+          
+          try {
+            await ModelManager.loadModel(id, { coexist: true });
+            console.log(`[VoiceTab] ✅ ${name} model loaded: ${id}`);
+          } catch (err) {
+            throw new Error(`Failed to load ${name} model (${id}): ${err instanceof Error ? err.message : String(err)}`);
+          }
+        } else {
+          console.log(`[VoiceTab] ✅ ${name} model already loaded: ${loaded.id}`);
+        }
+      }
+
+      console.log('[VoiceTab] All 4 voice models verified and loaded');
 
       // Create audio capture for microphone
       const mic = new AudioCapture({
@@ -194,18 +227,17 @@ export default function VoiceTab() {
     };
   }, [stopSession]);
 
-  // Sequential model loading UI
-  if (!sttReady) {
+  // Sequential model loading UI - Load VAD first (smallest)
+  if (!vadReady) {
     return (
       <div>
         <ModelBanner
-          modelId="sherpa-onnx-whisper-tiny.en"
-          modelName="Whisper STT (1/3)"
-          description="Speech recognition model. Converts your voice to text."
+          modelId="silero-vad-v5"
+          modelName="Silero VAD (1/4)"
+          description="Voice activity detection. Detects when you start/stop speaking (~5MB)."
           onReady={() => {
-            // STT is auto-initialized by ModelManager for archive models
-            console.log('[VoiceTab] STT model ready (auto-initialized)');
-            setSttReady(true);
+            console.log('[VoiceTab] VAD model ready');
+            setVadReady(true);
           }}
         />
 
@@ -235,7 +267,7 @@ export default function VoiceTab() {
     );
   }
 
-  if (sttReady && !llmReady) {
+  if (vadReady && !sttReady) {
     return (
       <div>
         <div style={{
@@ -248,14 +280,51 @@ export default function VoiceTab() {
           color: 'var(--color-text)',
           marginBottom: '12px'
         }}>
-          ✓ Step 1 complete — Speech recognition ready
+          ✓ Step 1 complete — Voice activity detection ready
         </div>
         <ModelBanner
-          modelId="smollm2-135m"
-          modelName="SmolLM2 135M AI (2/3)"
-          description="Lightweight AI brain optimized for real-time voice (~135MB)."
+          modelId="sherpa-onnx-whisper-tiny.en"
+          modelName="Whisper Tiny STT (2/4)"
+          description="Speech recognition. Converts your voice to text (~75MB)."
+          onReady={() => {
+            // STT is auto-initialized by ModelManager for archive models
+            console.log('[VoiceTab] STT model ready (auto-initialized)');
+            setSttReady(true);
+          }}
+        />
+
+        <div style={{
+          textAlign: 'center',
+          padding: '16px',
+          fontSize: '14px',
+          color: 'var(--color-text-muted)'
+        }}>
+          Step 2 of 4 — Loading speech recognition...
+        </div>
+      </div>
+    );
+  }
+
+  if (vadReady && sttReady && !llmReady) {
+    return (
+      <div>
+        <div style={{
+          margin: '16px',
+          padding: '12px',
+          background: 'rgba(52,211,153,0.1)',
+          borderRadius: 'var(--radius-md)',
+          borderLeft: '3px solid var(--color-accent)',
+          fontSize: '14px',
+          color: 'var(--color-text)',
+          marginBottom: '12px'
+        }}>
+          ✓ Steps 1 & 2 complete — VAD and speech recognition ready
+        </div>
+        <ModelBanner
+          modelId="lfm2-350m-q4_k_m"
+          modelName="LFM2 350M AI (3/4)"
+          description="High-quality AI brain for natural voice responses (~250MB)."
           onReady={() => setLlmReady(true)}
-          autoLoad={true}
         />
         <div style={{
           textAlign: 'center',
@@ -263,13 +332,13 @@ export default function VoiceTab() {
           fontSize: '14px',
           color: 'var(--color-text-muted)'
         }}>
-          Step 2 of 3 — Auto-loading AI brain...
+          Step 3 of 4 — Loading AI brain...
         </div>
       </div>
     );
   }
 
-  if (sttReady && llmReady && !ttsReady) {
+  if (vadReady && sttReady && llmReady && !ttsReady) {
     return (
       <div>
         <div style={{
@@ -282,11 +351,11 @@ export default function VoiceTab() {
           color: 'var(--color-text)',
           marginBottom: '12px'
         }}>
-          ✓ Steps 1 & 2 complete — Speech recognition and AI ready
+          ✓ Steps 1-3 complete — VAD, speech recognition, and AI ready
         </div>
         <ModelBanner
           modelId="vits-piper-en_US-lessac-medium"
-          modelName="Piper TTS (3/3)"
+          modelName="Piper TTS (4/4)"
           description="Text-to-speech model. Speaks the AI response aloud."
           onReady={async () => {
             try {
@@ -312,7 +381,6 @@ export default function VoiceTab() {
               setTtsReady(true);
             }
           }}
-          autoLoad={true}
         />
         <div style={{
           textAlign: 'center',
@@ -320,7 +388,7 @@ export default function VoiceTab() {
           fontSize: '14px',
           color: 'var(--color-text-muted)'
         }}>
-          Step 3 of 3 — Auto-loading voice synthesizer...
+          Step 4 of 4 — Loading voice synthesizer...
         </div>
       </div>
     );

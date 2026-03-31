@@ -38,17 +38,6 @@ export const MODELS: CompactModelDef[] = [
     memoryRequirement: 250_000_000,
   },
 
-  // LLM for Voice tab — smaller, faster for real-time voice
-  {
-    id: 'smollm2-135m',
-    name: 'SmolLM2 135M (Voice)',
-    repo: 'bartowski/SmolLM2-135M-Instruct-GGUF',
-    files: ['SmolLM2-135M-Instruct-Q4_K_M.gguf'],
-    framework: LLMFramework.LlamaCpp,
-    modality: ModelCategory.Language,
-    memoryRequirement: 135_000_000,
-  },
-
   // VLM — keep existing working model (already cached)
   {
     id: 'lfm2-vl-450m-q4_0',
