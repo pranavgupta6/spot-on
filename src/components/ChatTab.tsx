@@ -18,6 +18,8 @@ export function ChatTab() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const cancelRef = useRef<(() => void) | null>(null);
+  const pendingUpdateRef = useRef<string>('');
+  const rafIdRef = useRef<number | null>(null);
 
   // Auto-scroll to bottom when messages change
   useEffect(() => {
@@ -71,37 +73,56 @@ export function ChatTab() {
     setMessages(prev => [...prev, assistantMsg]);
 
     try {
-      const systemPrompt = `You are SpotOn's AI dermatology assistant.
-Help users understand skin conditions, symptoms, and when to seek medical care.
-Be clear, empathetic, and concise. Keep responses under 150 words.
-Never provide a definitive diagnosis — always recommend consulting a
-dermatologist for anything concerning. You are here to educate and
-reassure, not to replace medical advice.`;
+      const systemPrompt = `You are SpotOn's AI dermatology assistant. Help users understand skin conditions, symptoms, and when to seek medical care. Be clear, empathetic, and concise. Keep responses under 100 words. Never diagnose - always recommend consulting a dermatologist for anything concerning.`;
 
-      const conversationHistory = messages
+      // Only include last 4 messages (2 exchanges) to keep context window small
+      const recentMessages = messages.slice(-4);
+      const conversationHistory = recentMessages
         .map(m => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`)
         .join('\n');
 
-      const fullPrompt = `${systemPrompt}\n\nConversation:\n${conversationHistory}\nUser: ${userMessage}\nAssistant:`;
+      const fullPrompt = `${systemPrompt}\n\n${conversationHistory}\nUser: ${userMessage}\nAssistant:`;
 
       const { stream, cancel } = await TextGeneration.generateStream(fullPrompt, {
-        maxTokens: 300,
+        maxTokens: 150,
         temperature: 0.7,
       });
       cancelRef.current = cancel;
 
       let accumulated = '';
+      
+      // Batch DOM updates for better performance
+      const updateMessage = (text: string) => {
+        pendingUpdateRef.current = text;
+        if (!rafIdRef.current) {
+          rafIdRef.current = requestAnimationFrame(() => {
+            setMessages(prev => {
+              const updated = [...prev];
+              updated[updated.length - 1] = {
+                ...updated[updated.length - 1],
+                content: pendingUpdateRef.current
+              };
+              return updated;
+            });
+            rafIdRef.current = null;
+          });
+        }
+      };
+
       for await (const token of stream) {
         accumulated += token;
-        setMessages(prev => {
-          const updated = [...prev];
-          updated[updated.length - 1] = {
-            ...updated[updated.length - 1],
-            content: accumulated
-          };
-          return updated;
-        });
+        updateMessage(accumulated);
       }
+
+      // Final update to ensure we have the complete response
+      setMessages(prev => {
+        const updated = [...prev];
+        updated[updated.length - 1] = {
+          ...updated[updated.length - 1],
+          content: accumulated
+        };
+        return updated;
+      });
 
       setIsGenerating(false);
     } catch (err) {
@@ -124,6 +145,9 @@ reassure, not to replace medical advice.`;
   useEffect(() => {
     return () => {
       cancelRef.current?.();
+      if (rafIdRef.current) {
+        cancelAnimationFrame(rafIdRef.current);
+      }
     };
   }, []);
 
@@ -135,6 +159,7 @@ reassure, not to replace medical advice.`;
           modelName="LFM2 350M Chat Model"
           description="Required for AI dermatology chat. ~250MB, downloaded once."
           onReady={() => setModelReady(true)}
+          autoLoad={true}
         />
 
         {/* Feature preview card */}

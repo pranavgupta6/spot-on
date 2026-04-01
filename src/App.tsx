@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { initializeSDK } from './runanywhere';
 import { PrivacyBadge } from './components/PrivacyBadge';
+import { LandingPage } from './components/LandingPage';
 import ScanTab from './components/ScanTab';
 import ChatTab from './components/ChatTab';
 import VoiceTab from './components/VoiceTab';
@@ -9,27 +10,51 @@ import HistoryTab from './components/HistoryTab';
 type Tab = 'scan' | 'chat' | 'voice' | 'history';
 
 export function App() {
+  const [showLanding, setShowLanding] = useState(true);
   const [sdkReady, setSdkReady] = useState(false);
   const [sdkError, setSdkError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<Tab>('scan');
   const [showDisclaimer, setShowDisclaimer] = useState(false);
 
   useEffect(() => {
+    // Check if user has already visited
+    const hasVisited = localStorage.getItem('spoton_has_visited');
+    if (hasVisited) {
+      setShowLanding(false);
+    }
+
     // Check if disclaimer has been shown before
     const disclaimerSeen = localStorage.getItem('spoton_disclaimer_seen');
-    if (!disclaimerSeen) {
+    if (!disclaimerSeen && hasVisited) {
       setShowDisclaimer(true);
     }
 
-    // Initialize SDK
+    // Initialize SDK in background if user has visited before
+    if (hasVisited) {
+      initializeSDK()
+        .then(() => setSdkReady(true))
+        .catch((err) => setSdkError(err instanceof Error ? err.message : String(err)));
+    }
+  }, []);
+
+  const handleGetStarted = () => {
+    localStorage.setItem('spoton_has_visited', 'true');
+    setShowLanding(false);
+    setShowDisclaimer(true);
+    
+    // Start SDK initialization
     initializeSDK()
       .then(() => setSdkReady(true))
       .catch((err) => setSdkError(err instanceof Error ? err.message : String(err)));
-  }, []);
+  };
 
   const handleDisclaimerAccept = () => {
     localStorage.setItem('spoton_disclaimer_seen', 'true');
     setShowDisclaimer(false);
+  };
+
+  const handleLogoClick = () => {
+    setShowLanding(true);
   };
 
   const renderTabContent = () => {
@@ -46,6 +71,11 @@ export function App() {
         return null;
     }
   };
+
+  // Show landing page for first-time visitors
+  if (showLanding) {
+    return <LandingPage onGetStarted={handleGetStarted} />;
+  }
 
   return (
     <div className="app">
@@ -65,7 +95,11 @@ export function App() {
         zIndex: 100,
       }}>
         {/* LEFT: Logo + Name + Beta badge */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+        <button 
+          onClick={handleLogoClick}
+          className="logo-button"
+          aria-label="Return to landing page"
+        >
           <div style={{
             width: '32px',
             height: '32px',
@@ -87,7 +121,7 @@ export function App() {
             borderRadius: 'var(--radius-full)',
             letterSpacing: '0.5px',
           }}>BETA</span>
-        </div>
+        </button>
 
         {/* RIGHT: Privacy badge */}
         <PrivacyBadge />

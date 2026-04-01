@@ -23,10 +23,20 @@ export default function useModelLoader(modelId: string) {
         console.log(`[useModelLoader] 🔍 Checking if model "${modelId}" is cached...`)
         setState(prev => ({ ...prev, status: 'checking' }))
         
-        // Check if model is already downloaded
-        const isCached = await ModelManager.isModelDownloaded(modelId)
+        // Check if model is already downloaded by finding it in the catalog
+        const allModels = ModelManager.getModels()
+        const model = allModels.find(m => m.id === modelId)
         
-        console.log(`[useModelLoader] Cache status for "${modelId}":`, isCached ? '✅ CACHED' : '❌ NOT CACHED')
+        if (!model) {
+          console.error(`[useModelLoader] ❌ Model "${modelId}" not found in catalog`)
+          setState({ status: 'error', progress: 0, error: `Model "${modelId}" not registered`, isCached: false })
+          return
+        }
+        
+        // Check if model status is Downloaded or Loaded
+        const isCached = model.status === 'downloaded' || model.status === 'loaded'
+        
+        console.log(`[useModelLoader] Cache status for "${modelId}":`, isCached ? '✅ CACHED' : '❌ NOT CACHED', `(status: ${model.status})`)
         
         if (isCached) {
           // Model is cached, skip download and just load it
